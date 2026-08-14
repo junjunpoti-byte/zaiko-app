@@ -162,6 +162,7 @@ function AuthScreen() {
   const [mode, setMode] = useState("signin"); // signin | signup
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -173,7 +174,14 @@ function AuthScreen() {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
       } else {
-        const { error } = await supabase.auth.signUp({ email, password });
+        if (!name.trim()) { setErr("お名前を入力してください。"); setBusy(false); return; }
+        const { error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: { display_name: name.trim() },
+          },
+        });
         if (error) throw error;
         setMsg("登録しました。確認メールの設定によっては、そのままログインできます。");
       }
@@ -191,6 +199,9 @@ function AuthScreen() {
         <div style={styles.stampBadge}><Package size={20} color={COLORS.paper} /></div>
         <div style={styles.modalTitle}>在庫管理台帳</div>
         <div style={styles.modalSub}>{mode === "signin" ? "ログイン" : "新規登録"}してください。</div>
+        {mode === "signup" && (
+          <input style={styles.input} type="text" placeholder="お名前" value={name} onChange={(e) => setName(e.target.value)} />
+        )}
         <input style={styles.input} type="email" placeholder="メールアドレス" value={email} onChange={(e) => setEmail(e.target.value)} />
         <input style={styles.input} type="password" placeholder="パスワード" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
         {err && <div style={styles.inlineError}>{err}</div>}
@@ -198,14 +209,13 @@ function AuthScreen() {
         <button style={styles.primaryBtn} onClick={submit} disabled={busy}>
           {busy ? "処理中…" : mode === "signin" ? "ログイン" : "登録する"}
         </button>
-        <button style={styles.smallGhostBtn} onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setErr(""); setMsg(""); }}>
+        <button style={styles.smallGhostBtn} onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setErr(""); setMsg(""); setName(""); }}>
           {mode === "signin" ? "アカウントを新規作成" : "ログイン画面に戻る"}
         </button>
       </div>
     </div>
   );
 }
-
 // ==================== MAIN APP ====================
 export default function App() {
   const [session, setSession] = useState(null);
