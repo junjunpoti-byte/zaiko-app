@@ -158,33 +158,18 @@ function VoiceField({ label, value, onChange, placeholder, numeric = false, type
 }
 
 // ==================== AUTH ====================
+// ==================== AUTH ====================
 function AuthScreen() {
-  const [mode, setMode] = useState("signin"); // signin | signup
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
   const [err, setErr] = useState("");
-  const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
-    setErr(""); setMsg(""); setBusy(true);
+    setErr(""); setBusy(true);
     try {
-      if (mode === "signin") {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-      } else {
-        if (!name.trim()) { setErr("お名前を入力してください。"); setBusy(false); return; }
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: { display_name: name.trim() },
-          },
-        });
-        if (error) throw error;
-        setMsg("登録しました。確認メールの設定によっては、そのままログインできます。");
-      }
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
     } catch (e) {
       setErr(e.message || "エラーが発生しました。");
     } finally {
@@ -198,19 +183,46 @@ function AuthScreen() {
       <div style={{ ...styles.modalCard, maxWidth: 320 }}>
         <div style={styles.stampBadge}><Package size={20} color={COLORS.paper} /></div>
         <div style={styles.modalTitle}>在庫管理台帳</div>
-        <div style={styles.modalSub}>{mode === "signin" ? "ログイン" : "新規登録"}してください。</div>
-        {mode === "signup" && (
-          <input style={styles.input} type="text" placeholder="お名前" value={name} onChange={(e) => setName(e.target.value)} />
-        )}
+        <div style={styles.modalSub}>ログインしてください。</div>
         <input style={styles.input} type="email" placeholder="メールアドレス" value={email} onChange={(e) => setEmail(e.target.value)} />
         <input style={styles.input} type="password" placeholder="パスワード" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
         {err && <div style={styles.inlineError}>{err}</div>}
-        {msg && <div style={styles.inlineSuccess}>{msg}</div>}
         <button style={styles.primaryBtn} onClick={submit} disabled={busy}>
-          {busy ? "処理中…" : mode === "signin" ? "ログイン" : "登録する"}
+          {busy ? "処理中…" : "ログイン"}
         </button>
-        <button style={styles.smallGhostBtn} onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setErr(""); setMsg(""); setName(""); }}>
-          {mode === "signin" ? "アカウントを新規作成" : "ログイン画面に戻る"}
+      </div>
+    </div>
+  );
+}
+
+// ==================== NAME SETUP (first login only) ====================
+function NameSetupScreen({ onSave }) {
+  const [name, setName] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!name.trim()) { setErr("お名前を入力してください。"); return; }
+    setErr(""); setBusy(true);
+    try {
+      await onSave(name.trim());
+    } catch (e) {
+      setErr(e.message || "エラーが発生しました。");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ ...styles.root, alignItems: "center", justifyContent: "center", display: "flex" }}>
+      <style>{FONT_IMPORT}</style>
+      <div style={{ ...styles.modalCard, maxWidth: 320 }}>
+        <div style={styles.stampBadge}><Package size={20} color={COLORS.paper} /></div>
+        <div style={styles.modalTitle}>お名前を設定</div>
+        <div style={styles.modalSub}>初回ログインです。表示する名前を入力してください。</div>
+        <input style={styles.input} type="text" placeholder="お名前" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
+        {err && <div style={styles.inlineError}>{err}</div>}
+        <button style={styles.primaryBtn} onClick={submit} disabled={busy}>
+          {busy ? "保存中…" : "はじめる"}
         </button>
       </div>
     </div>
@@ -227,24 +239,19 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  const saveDisplayName = async (name) => {
+    const { data, error } = await supabase.auth.updateUser({ data: { display_name: name } });
+    if (error) throw error;
+    setSession((prev) => prev ? { ...prev, user: data.user } : prev);
+  };
+
   if (checkingAuth) {
     return <div style={{ ...styles.root, alignItems: "center", justifyContent: "center", display: "flex" }}><style>{FONT_IMPORT}</style></div>;
   }
   if (!session) return <AuthScreen />;
+  if (!session.user.user_metadata?.display_name) return <NameSetupScreen onSave={saveDisplayName} />;
   return <MainApp session={session} />;
 }
-
-function MainApp({ session }) {
-  const [products, setProducts] = useState([]);
-  const [movements, setMovements] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [saveError, setSaveError] = useState("");
-  const [tab, setTab] = useState("stock");
-  const [stamp, setStamp] = useState(null);
-  const [jumpToProductId, setJumpToProductId] = useState(null);
-
-  const displayName = session.user.user_metadata?.display_name || session.user.email;
-
   // initial fetch
   useEffect(() => {
     (async () => {
