@@ -158,7 +158,6 @@ function VoiceField({ label, value, onChange, placeholder, numeric = false, type
 }
 
 // ==================== AUTH ====================
-// ==================== AUTH ====================
 function AuthScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -228,6 +227,7 @@ function NameSetupScreen({ onSave }) {
     </div>
   );
 }
+
 // ==================== MAIN APP ====================
 export default function App() {
   const [session, setSession] = useState(null);
@@ -252,6 +252,18 @@ export default function App() {
   if (!session.user.user_metadata?.display_name) return <NameSetupScreen onSave={saveDisplayName} />;
   return <MainApp session={session} />;
 }
+
+function MainApp({ session }) {
+  const [products, setProducts] = useState([]);
+  const [movements, setMovements] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saveError, setSaveError] = useState("");
+  const [tab, setTab] = useState("stock");
+  const [stamp, setStamp] = useState(null);
+  const [jumpToProductId, setJumpToProductId] = useState(null);
+
+  const displayName = session.user.user_metadata?.display_name || session.user.email;
+
   // initial fetch
   useEffect(() => {
     (async () => {
