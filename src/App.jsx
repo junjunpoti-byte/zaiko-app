@@ -265,19 +265,40 @@ function MainApp({ session }) {
   const displayName = session.user.user_metadata?.display_name || session.user.email;
 
   // initial fetch
-  useEffect(() => {
-    (async () => {
-      const [{ data: p, error: pe }, { data: m, error: me }] = await Promise.all([
-        supabase.from("products").select("*").order("created_at", { ascending: true }),
-        supabase.from("movements").select("*").order("created_at", { ascending: false }),
-      ]);
-      if (pe || me) setSaveError("データの取得に失敗しました。");
-      setProducts(p || []);
-      setMovements(m || []);
-      setLoading(false);
-    })();
-  }, []);
+  // 古い履歴を13か月保持し、それより前の月を一括削除
+useEffect(() => {
+  (async () => {
+    // 今月を含めて13か月分を残す。
+    // 例：2026年8月なら、2025年8月1日より前を削除。
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - 12);
+    cutoff.setDate(1);
+    cutoff.setHours(0, 0, 0, 0);
 
+    // 13か月より古い履歴を一括削除
+    const { error: deleteError } = await supabase
+      .from("movements")
+      .delete()
+      .lt("created_at", cutoff.toISOString());
+
+    if (deleteError) {
+      setSaveError("古い履歴の自動削除に失敗しました。");
+      console.error("古い履歴の削除に失敗:", deleteError);
+    }
+
+    // 商品と履歴を取得
+    const [{ data: p, error: pe }, { data: m, error: me }] = await Promise.all([
+      supabase.from("products").select("*").order("created_at", { ascending: true }),
+      supabase.from("movements").select("*").order("created_at", { ascending: false }),
+    ]);
+
+    if (pe || me) setSaveError("データの取得に失敗しました。");
+
+    setProducts(p || []);
+    setMovements(m || []);
+    setLoading(false);
+  })();
+}, []);
   // realtime sync: reflects changes from any device/user immediately
   useEffect(() => {
     const channel = supabase
