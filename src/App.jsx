@@ -326,13 +326,55 @@ useEffect(() => {
   const stockKgOf = (productId) =>
     movements.filter((m) => m.product_id === productId).reduce((acc, m) => acc + (m.type === "in" ? Number(m.qty) : -Number(m.qty)), 0);
 
-  const addProduct = async ({ sku, name }) => {
+  const addProduct = async ({ sku, name, qty }) => {
     const cleanSku = sku.trim();
     const cleanName = name.trim() || cleanSku;
-    const { error } = await supabase.from("products").insert({
-      sku: cleanSku, name: cleanName, location: "未設定", memo: "", created_by: session.user.id,
-    });
-    if (error) setSaveError("登録に失敗しました: " + error.message); else setSaveError("");
+    const qtyNum = Number(qty) || 0;
+    const { data: inserted, error } = await supabase.from("products")
+      .insert({ sku: cleanSku, name: cleanName, location: "未設定", memo: "", created_by: session.user.id })
+      .select().single();
+    if (error) { setSaveError("登録に失敗しました: " + error.message); return; }
+    setSaveError("");
+    // 数量が入力されている場合のみ、登録と同時に入荷履歴を作成する（0kgの場合は履歴を作らない）
+    if (qtyNum > 0) {
+      const { error: moveError } = await supabase.from("movements").insert({
+        product_id: inserted.id, type: "in", qty: qtyNum, person: displayName, user_id: session.user.id,
+      });
+      if (moveError) setSaveError("入荷履歴の作成に失敗しました: " + moveError.message);
+    }
+  };
+
+  // 通常の商品登録で、CSV登録と同じ重複解決（合算する／スキップ／別の商品で登録）を行う
+  const resolveProductConflict = async ({ sku, name, qty, resolution, existing }) => {
+    const qtyNum = Number(qty) || 0;
+    if (resolution === "skip") { setSaveError(""); return; }
+    if (resolution === "merge") {
+      if (qtyNum > 0) {
+        const { error } = await supabase.from("movements").insert({
+          product_id: existing.id, type: "in", qty: qtyNum, person: displayName, user_id: session.user.id,
+        });
+        if (error) { setSaveError("記録に失敗しました: " + error.message); return; }
+      }
+      setSaveError("");
+      return;
+    }
+    if (resolution === "addNew") {
+      const cleanSku = sku.trim();
+      const cleanName = name.trim() || cleanSku;
+      // 既存商品と区別できるSKUを内部的に生成する
+      const newSku = `${cleanSku}-${Date.now().toString().slice(-5)}`;
+      const { data: inserted, error } = await supabase.from("products")
+        .insert({ sku: newSku, name: cleanName, location: "未設定", memo: "", created_by: session.user.id })
+        .select().single();
+      if (error) { setSaveError("登録に失敗しました: " + error.message); return; }
+      if (qtyNum > 0) {
+        const { error: moveError } = await supabase.from("movements").insert({
+          product_id: inserted.id, type: "in", qty: qtyNum, person: displayName, user_id: session.user.id,
+        });
+        if (moveError) { setSaveError("入荷履歴の作成に失敗しました: " + moveError.message); return; }
+      }
+      setSaveError("");
+    }
   };
 
   const updateProductField = async (productId, field, value) => {
@@ -497,7 +539,7 @@ useEffect(() => {
         {tab === "history" && <HistoryList movements={movements} products={products} />}
         {tab === "products" && (
           <ProductForm
-            onSubmit={addProduct} products={products} movements={movements} stockKgOf={stockKgOf}
+            onSubmit={addProduct} onResolveConflict={resolveProductConflict} products={products} movements={movements} stockKgOf={stockKgOf}
             onDelete={deleteProduct} onDetectConflicts={detectCsvConflicts} onCommitImport={commitCsvImport}
             onExportBackup={exportBackup} onRestoreBackup={restoreBackup}
           />
@@ -728,12 +770,13 @@ function stockBreakdownOfSimple(product, movements) {
 // ---------- History ----------
 function HistoryList({ movements, products }) {
   const [query, setQuery] = useState("");
+  const [filterType, setFilterType] = useState("all"); // all | in | out
   const [filterMode, setFilterMode] = useState("all");
   const [filterDate, setFilterDate] = useState("");
   const [filterMonth, setFilterMonth] = useState("");
   const [visibleCount, setVisibleCount] = useState(HISTORY_PAGE_SIZE);
 
-  useEffect(() => { setVisibleCount(HISTORY_PAGE_SIZE); }, [query, filterMode, filterDate, filterMonth]);
+  useEffect(() => { setVisibleCount(HISTORY_PAGE_SIZE); }, [query, filterType, filterMode, filterDate, filterMonth]);
 
   if (movements.length === 0) return <EmptyState text="まだ入荷・消費の記録がありません。" />;
 
@@ -747,6 +790,7 @@ function HistoryList({ movements, products }) {
       const hay = `${p.sku || ""} ${p.name || ""}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
+    if (filterType !== "all" && m.type !== filterType) return false;
     if (filterMode === "day" && filterDate && dayKey(m.created_at) !== filterDate) return false;
     if (filterMode === "month" && filterMonth && monthKey(m.created_at) !== filterMonth) return false;
     return true;
@@ -757,6 +801,11 @@ function HistoryList({ movements, products }) {
   return (
     <div>
       <div style={styles.searchWrap}><Search size={15} color={COLORS.steel} /><VoiceField value={query} onChange={setQuery} placeholder="商品・色で検索" /></div>
+      <div style={styles.typeFilterRow}>
+        <button onClick={() => setFilterType("all")} style={{ ...styles.typeFilterBtn, ...(filterType === "all" ? styles.typeFilterBtnActive : {}) }}>すべて</button>
+        <button onClick={() => setFilterType("in")} style={{ ...styles.typeFilterBtn, ...(filterType === "in" ? styles.typeBtnInActive : {}) }}><ArrowDownCircle size={16} />入荷</button>
+        <button onClick={() => setFilterType("out")} style={{ ...styles.typeFilterBtn, ...(filterType === "out" ? styles.typeBtnOutActive : {}) }}><ArrowUpCircle size={16} />消費</button>
+      </div>
       <div style={styles.filterRow}>
         <select style={{ ...styles.input, flex: "0 0 auto", width: "auto" }} value={filterMode} onChange={(e) => setFilterMode(e.target.value)}>
           <option value="all">全期間</option><option value="day">日別</option><option value="month">月別</option>
@@ -799,9 +848,10 @@ function HistoryList({ movements, products }) {
 }
 
 // ---------- Product form (register / delete / CSV import / backup) ----------
-function ProductForm({ onSubmit, products, movements, stockKgOf, onDelete, onDetectConflicts, onCommitImport, onExportBackup, onRestoreBackup }) {
+function ProductForm({ onSubmit, onResolveConflict, products, movements, stockKgOf, onDelete, onDetectConflicts, onCommitImport, onExportBackup, onRestoreBackup }) {
   const [sku, setSku] = useState("");
   const [name, setName] = useState("");
+  const [qty, setQty] = useState("");
   const [err, setErr] = useState("");
   const [done, setDone] = useState(false);
   const fileInputRef = useRef(null);
@@ -810,15 +860,36 @@ function ProductForm({ onSubmit, products, movements, stockKgOf, onDelete, onDet
   const [deleteTargetId, setDeleteTargetId] = useState("");
   const [confirmProduct, setConfirmProduct] = useState(null);
   const [pendingImport, setPendingImport] = useState(null);
+  const [pendingConflict, setPendingConflict] = useState(null);
   const backupFileRef = useRef(null);
   const [backupMsg, setBackupMsg] = useState("");
   const [restoring, setRestoring] = useState(false);
 
+  const resetForm = () => { setSku(""); setName(""); setQty(""); };
+
   const submit = () => {
     if (!sku.trim()) { setErr("商品は必須です。"); return; }
+    const cleanSku = sku.trim();
+    // CSV登録と同じ重複チェック：商品(SKU)が既存商品と一致する場合は確認モーダルを出す
+    const existing = products.find((p) => (p.sku || "").trim().toLowerCase() === cleanSku.toLowerCase());
     setErr("");
-    onSubmit({ sku, name });
-    setSku(""); setName(""); setDone(true);
+    if (existing) {
+      setPendingConflict({ sku: cleanSku, name, qty, existing, resolution: "merge" });
+      return;
+    }
+    onSubmit({ sku, name, qty });
+    resetForm(); setDone(true);
+    setTimeout(() => setDone(false), 1800);
+  };
+
+  const resolveConflict = async () => {
+    if (!pendingConflict) return;
+    await onResolveConflict({
+      sku: pendingConflict.sku, name: pendingConflict.name, qty: pendingConflict.qty,
+      resolution: pendingConflict.resolution, existing: pendingConflict.existing,
+    });
+    setPendingConflict(null);
+    resetForm(); setDone(true);
     setTimeout(() => setDone(false), 1800);
   };
 
@@ -884,6 +955,8 @@ function ProductForm({ onSubmit, products, movements, stockKgOf, onDelete, onDet
       <div style={styles.formCard}>
         <VoiceField label="商品" value={sku} onChange={setSku} placeholder="例: 飼料用トウモロコシ" />
         <VoiceField label="色（任意・未入力の場合は商品と同じになります）" value={name} onChange={setName} placeholder="例: 白" />
+        <VoiceField label="数量（kg）（任意・未入力は0kgとして登録されます）" value={qty} onChange={setQty} placeholder="0" numeric
+          helper={Number(qty) > 0 ? `登録と同時に入荷 ${breakdownLabel(Number(qty))} を記録します` : "0kgの場合は入荷履歴を作成しません"} />
         <div style={styles.fieldHelper}>保管場所・メモは登録後、在庫一覧からいつでも設定・変更できます。</div>
         {err && <div style={styles.inlineError}>{err}</div>}
         {done && <div style={styles.inlineSuccess}><Check size={14} /> 登録しました</div>}
@@ -943,6 +1016,52 @@ function ProductForm({ onSubmit, products, movements, stockKgOf, onDelete, onDet
                 <Trash2 size={15} />削除する
               </button>
               <button style={{ ...styles.smallGhostBtn, flex: "0 0 auto", padding: "0 16px" }} onClick={() => setConfirmProduct(null)}>キャンセル</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingConflict && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, maxWidth: 420 }}>
+            <div style={styles.modalTitle}>同じ商品が見つかりました</div>
+            <div style={styles.modalSub}>「{pendingConflict.sku}」は既存の商品と同じです。どう扱うか選んでください。</div>
+            <div style={styles.conflictCard}>
+              <div style={styles.conflictName}>{pendingConflict.existing.sku}</div>
+              <div style={styles.conflictCompareRow}>
+                <div style={styles.conflictCol}>
+                  <div style={styles.conflictColTitle}>既存</div>
+                  <div style={styles.conflictColLine}>{pendingConflict.existing.location || "未設定"}</div>
+                  <div style={{ ...styles.conflictColLine, fontFamily: "'IBM Plex Mono', monospace" }}>
+                    {stockBreakdownLabel(stockBreakdownOf(pendingConflict.existing.id, movements))}
+                  </div>
+                </div>
+                <div style={styles.conflictCol}>
+                  <div style={styles.conflictColTitle}>今回の入力</div>
+                  <div style={styles.conflictColLine}>{(pendingConflict.name || "").trim() || pendingConflict.sku}</div>
+                  <div style={{ ...styles.conflictColLine, fontFamily: "'IBM Plex Mono', monospace" }}>
+                    {Number(pendingConflict.qty) > 0 ? breakdownLabel(Number(pendingConflict.qty)) : "0kg"}
+                  </div>
+                </div>
+              </div>
+              <div style={styles.conflictActions}>
+                <button style={{ ...styles.conflictActionBtn, ...(pendingConflict.resolution === "merge" ? styles.conflictActionBtnActive : {}) }}
+                  onClick={() => setPendingConflict((p) => ({ ...p, resolution: "merge" }))}>合算する</button>
+                <button style={{ ...styles.conflictActionBtn, ...(pendingConflict.resolution === "skip" ? styles.conflictActionBtnActive : {}) }}
+                  onClick={() => setPendingConflict((p) => ({ ...p, resolution: "skip" }))}>スキップ</button>
+                <button style={{ ...styles.conflictActionBtn, ...(pendingConflict.resolution === "addNew" ? styles.conflictActionBtnActive : {}) }}
+                  onClick={() => setPendingConflict((p) => ({ ...p, resolution: "addNew" }))}>別の商品で登録</button>
+              </div>
+              {pendingConflict.resolution === "merge" && (
+                <div style={styles.conflictMergeNote}>合算する: 入力した数量を既存商品の在庫に入荷として加算します（未入力の場合は0kgのため在庫は増えません）</div>
+              )}
+              {pendingConflict.resolution === "addNew" && (
+                <div style={styles.conflictMergeNote}>別の商品で登録: 既存商品とは別に、区別できるSKUを付けて新しい商品として登録します</div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={{ ...styles.primaryBtn, flex: 1, marginTop: 0 }} onClick={resolveConflict}>実行する</button>
+              <button style={{ ...styles.smallGhostBtn, flex: "0 0 auto", padding: "0 16px" }} onClick={() => setPendingConflict(null)}>キャンセル</button>
             </div>
           </div>
         </div>
@@ -1014,79 +1133,82 @@ function StampOverlay({ type, qty }) {
 }
 
 const styles = {
-  root: { minHeight: "100vh", background: COLORS.paper, fontFamily: "'IBM Plex Sans', sans-serif", color: COLORS.ink, display: "flex", flexDirection: "column" },
-  header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 18px 14px", borderBottom: `2px solid ${COLORS.ink}`, background: COLORS.paper },
+  root: { minHeight: "100vh", background: COLORS.paper, fontFamily: "'IBM Plex Sans', sans-serif", color: COLORS.ink, display: "flex", flexDirection: "column", fontSize: 16 },
+  header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 18px 16px", borderBottom: `2px solid ${COLORS.ink}`, background: COLORS.paper },
   headerLeft: { display: "flex", alignItems: "center", gap: 12 },
-  stampBadge: { width: 38, height: 38, borderRadius: 6, background: COLORS.ink, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
-  title: { fontFamily: "'Oswald', sans-serif", fontSize: 20, fontWeight: 600, letterSpacing: 0.3, lineHeight: 1.1 },
-  subtitle: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: COLORS.steel, letterSpacing: 1, marginTop: 2 },
-  nameChip: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "6px 10px", color: COLORS.ink },
-  iconBtn: { width: 30, height: 30, borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.steel, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
-  errorBanner: { background: "#F3E3DE", color: COLORS.rust, fontSize: 13, padding: "8px 16px" },
+  stampBadge: { width: 44, height: 44, borderRadius: 6, background: COLORS.ink, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  title: { fontFamily: "'Oswald', sans-serif", fontSize: 23, fontWeight: 600, letterSpacing: 0.3, lineHeight: 1.15 },
+  subtitle: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: COLORS.steel, letterSpacing: 1, marginTop: 2 },
+  nameChip: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "8px 12px", color: COLORS.ink },
+  iconBtn: { width: 40, height: 40, borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.steel, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+  errorBanner: { background: "#F3E3DE", color: COLORS.rust, fontSize: 15, padding: "10px 16px" },
   tabs: { display: "flex", borderBottom: `1px solid ${COLORS.line}`, background: COLORS.paperDark, overflowX: "auto" },
-  tabBtn: { display: "flex", alignItems: "center", gap: 6, padding: "12px 14px", background: "transparent", border: "none", fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" },
+  tabBtn: { display: "flex", alignItems: "center", gap: 6, padding: "14px 16px", background: "transparent", border: "none", fontSize: 15, cursor: "pointer", whiteSpace: "nowrap", minHeight: 48 },
   main: { flex: 1, padding: 16, paddingBottom: 90 },
-  footer: { textAlign: "center", fontSize: 11, color: COLORS.steel, padding: "10px 16px 18px", fontFamily: "'IBM Plex Mono', monospace" },
-  searchWrap: { display: "flex", alignItems: "center", gap: 8, background: "#F2EEE3", border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 10px", marginBottom: 12 },
+  footer: { textAlign: "center", fontSize: 12.5, color: COLORS.steel, padding: "10px 16px 18px", fontFamily: "'IBM Plex Mono', monospace" },
+  searchWrap: { display: "flex", alignItems: "center", gap: 8, background: "#F2EEE3", border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "10px 12px", marginBottom: 12 },
   filterRow: { display: "flex", gap: 8, marginBottom: 12 },
-  historyCount: { fontSize: 11.5, color: COLORS.steel, marginBottom: 8, fontFamily: "'IBM Plex Mono', monospace" },
-  loadMoreBtn: { width: "100%", marginTop: 10, padding: "10px 0", borderRadius: 6, border: `1px solid ${COLORS.line}`, background: "#F2EEE3", color: COLORS.ink, fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  historyCount: { fontSize: 13, color: COLORS.steel, marginBottom: 8, fontFamily: "'IBM Plex Mono', monospace" },
+  loadMoreBtn: { width: "100%", marginTop: 10, padding: "13px 0", borderRadius: 6, border: `1px solid ${COLORS.line}`, background: "#F2EEE3", color: COLORS.ink, fontSize: 15, fontWeight: 600, cursor: "pointer", minHeight: 48 },
   tableWrap: { border: `1px solid ${COLORS.line}`, borderRadius: 6, overflow: "hidden", background: "#F2EEE3", overflowX: "auto" },
-  table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
-  th: { textAlign: "left", padding: "10px 10px", fontSize: 11, color: COLORS.steel, borderBottom: `1px solid ${COLORS.line}`, fontWeight: 600, whiteSpace: "nowrap" },
-  td: { padding: "10px 10px", borderBottom: `1px solid ${COLORS.line}`, verticalAlign: "top" },
+  table: { width: "100%", borderCollapse: "collapse", fontSize: 15 },
+  th: { textAlign: "left", padding: "12px 12px", fontSize: 13, color: COLORS.steel, borderBottom: `1px solid ${COLORS.line}`, fontWeight: 600, whiteSpace: "nowrap" },
+  td: { padding: "12px 12px", borderBottom: `1px solid ${COLORS.line}`, verticalAlign: "top" },
   productLinkBtn: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", textAlign: "left", color: COLORS.ink, width: "100%", minWidth: 140 },
-  selectedProductBanner: { background: COLORS.paperDark, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "8px 12px", marginBottom: 4 },
-  formCard: { background: "#F2EEE3", border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, display: "flex", flexDirection: "column", gap: 10, maxWidth: 480 },
-  label: { fontSize: 11.5, color: COLORS.steel, display: "block", marginBottom: 4 },
-  input: { fontSize: 14, padding: "10px 12px", borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.ink, outline: "none", width: "100%", boxSizing: "border-box" },
-  micBtn: { width: 34, height: 34, borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.steel, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 },
+  selectedProductBanner: { background: COLORS.paperDark, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "10px 14px", marginBottom: 4 },
+  formCard: { background: "#F2EEE3", border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: 18, display: "flex", flexDirection: "column", gap: 12, maxWidth: 480 },
+  label: { fontSize: 13.5, color: COLORS.steel, display: "block", marginBottom: 5 },
+  input: { fontSize: 16, padding: "13px 14px", borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.ink, outline: "none", width: "100%", boxSizing: "border-box", minHeight: 48 },
+  micBtn: { width: 44, height: 44, borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.steel, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 },
   micBtnActive: { background: COLORS.rust, borderColor: COLORS.rust, color: "#fff", animation: "micPulse 1s infinite" },
-  fieldSuffix: { fontSize: 12, color: COLORS.steel, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" },
-  fieldHelper: { fontSize: 11.5, color: COLORS.amberDark, marginTop: 4, fontFamily: "'IBM Plex Mono', monospace" },
-  listeningHint: { fontSize: 11, color: COLORS.rust, marginTop: 4 },
-  typeBtn: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.steel, fontSize: 13, cursor: "pointer", fontWeight: 600 },
+  fieldSuffix: { fontSize: 13.5, color: COLORS.steel, fontFamily: "'IBM Plex Mono', monospace", whiteSpace: "nowrap" },
+  fieldHelper: { fontSize: 13.5, color: COLORS.amberDark, marginTop: 4, fontFamily: "'IBM Plex Mono', monospace" },
+  listeningHint: { fontSize: 13, color: COLORS.rust, marginTop: 4 },
+  typeBtn: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "14px 0", borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.steel, fontSize: 15, cursor: "pointer", fontWeight: 600, minHeight: 48 },
   typeBtnInActive: { background: COLORS.amber, borderColor: COLORS.amber, color: "#fff" },
   typeBtnOutActive: { background: COLORS.rust, borderColor: COLORS.rust, color: "#fff" },
-  primaryBtn: { marginTop: 8, padding: "12px 0", borderRadius: 6, border: "none", background: COLORS.ink, color: COLORS.paper, fontSize: 14, fontWeight: 600, cursor: "pointer" },
-  secondaryBtn: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "11px 0", borderRadius: 6, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.ink, fontSize: 13.5, fontWeight: 600, cursor: "pointer" },
-  dangerBtn: { display: "flex", alignItems: "center", gap: 8, marginTop: 4, padding: "11px 16px", borderRadius: 6, border: "none", background: COLORS.rust, color: "#fff", fontSize: 13.5, fontWeight: 600, cursor: "pointer" },
-  sectionTitle: { fontFamily: "'Oswald', sans-serif", fontSize: 15, fontWeight: 600, color: COLORS.ink },
-  confirmInfoBox: { background: COLORS.paperDark, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 6 },
-  confirmInfoRow: { display: "flex", justifyContent: "space-between", fontSize: 13, gap: 10 },
-  confirmInfoLabel: { color: COLORS.steel, fontSize: 11.5, flexShrink: 0 },
-  conflictCard: { background: COLORS.paperDark, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 },
-  conflictName: { fontWeight: 600, fontSize: 13.5 },
+  typeFilterRow: { display: "flex", gap: 8, marginBottom: 12 },
+  typeFilterBtn: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "12px 0", borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.steel, fontSize: 14.5, cursor: "pointer", fontWeight: 600, minHeight: 44 },
+  typeFilterBtnActive: { background: COLORS.ink, borderColor: COLORS.ink, color: COLORS.paper },
+  primaryBtn: { marginTop: 8, padding: "15px 0", borderRadius: 6, border: "none", background: COLORS.ink, color: COLORS.paper, fontSize: 16, fontWeight: 600, cursor: "pointer", minHeight: 50 },
+  secondaryBtn: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "14px 0", borderRadius: 6, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.ink, fontSize: 15, fontWeight: 600, cursor: "pointer", minHeight: 48 },
+  dangerBtn: { display: "flex", alignItems: "center", gap: 8, marginTop: 4, padding: "14px 16px", borderRadius: 6, border: "none", background: COLORS.rust, color: "#fff", fontSize: 15, fontWeight: 600, cursor: "pointer", minHeight: 48 },
+  sectionTitle: { fontFamily: "'Oswald', sans-serif", fontSize: 17, fontWeight: 600, color: COLORS.ink },
+  confirmInfoBox: { background: COLORS.paperDark, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 7 },
+  confirmInfoRow: { display: "flex", justifyContent: "space-between", fontSize: 15, gap: 10 },
+  confirmInfoLabel: { color: COLORS.steel, fontSize: 13, flexShrink: 0 },
+  conflictCard: { background: COLORS.paperDark, border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 9 },
+  conflictName: { fontWeight: 600, fontSize: 15.5 },
   conflictCompareRow: { display: "flex", gap: 10 },
-  conflictCol: { flex: 1, background: "#fff", border: `1px solid ${COLORS.line}`, borderRadius: 5, padding: "6px 8px" },
-  conflictColTitle: { fontSize: 10.5, color: COLORS.steel, marginBottom: 3 },
-  conflictColLine: { fontSize: 12.5, color: COLORS.ink },
+  conflictCol: { flex: 1, background: "#fff", border: `1px solid ${COLORS.line}`, borderRadius: 5, padding: "8px 10px" },
+  conflictColTitle: { fontSize: 12, color: COLORS.steel, marginBottom: 3 },
+  conflictColLine: { fontSize: 14.5, color: COLORS.ink },
   conflictActions: { display: "flex", gap: 6 },
-  conflictActionBtn: { flex: 1, padding: "7px 4px", borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.steel, fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  conflictActionBtn: { flex: 1, padding: "11px 4px", borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "#fff", color: COLORS.steel, fontSize: 13.5, fontWeight: 600, cursor: "pointer", minHeight: 44 },
   conflictActionBtnActive: { background: COLORS.ink, borderColor: COLORS.ink, color: COLORS.paper },
-  conflictMergeNote: { fontSize: 11, color: COLORS.amberDark, fontFamily: "'IBM Plex Mono', monospace" },
-  locationBtn: { display: "inline-flex", alignItems: "center", gap: 4, background: "transparent", border: `1px dashed ${COLORS.line}`, borderRadius: 5, padding: "4px 8px", fontSize: 12.5, color: COLORS.steel, cursor: "pointer" },
+  conflictMergeNote: { fontSize: 13, color: COLORS.amberDark, fontFamily: "'IBM Plex Mono', monospace" },
+  locationBtn: { display: "inline-flex", alignItems: "center", gap: 4, background: "transparent", border: `1px dashed ${COLORS.line}`, borderRadius: 5, padding: "7px 10px", fontSize: 14.5, color: COLORS.steel, cursor: "pointer" },
   pickerRow: { display: "flex", gap: 8 },
   pickerColumn: { flex: 1, display: "flex", flexDirection: "column", minWidth: 0 },
-  pickerColumnTitle: { fontSize: 10.5, color: COLORS.steel, textAlign: "center", marginBottom: 4, fontFamily: "'IBM Plex Mono', monospace" },
-  pickerColumnList: { height: 160, overflowY: "auto", border: `1px solid ${COLORS.line}`, borderRadius: 6, background: "#fff", display: "flex", flexDirection: "column" },
-  pickerOption: { padding: "9px 4px", border: "none", borderBottom: `1px solid ${COLORS.paperDark}`, background: "transparent", fontSize: 13, color: COLORS.ink, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace", textAlign: "center" },
+  pickerColumnTitle: { fontSize: 12, color: COLORS.steel, textAlign: "center", marginBottom: 4, fontFamily: "'IBM Plex Mono', monospace" },
+  pickerColumnList: { height: 190, overflowY: "auto", border: `1px solid ${COLORS.line}`, borderRadius: 6, background: "#fff", display: "flex", flexDirection: "column" },
+  pickerOption: { padding: "13px 4px", border: "none", borderBottom: `1px solid ${COLORS.paperDark}`, background: "transparent", fontSize: 15, color: COLORS.ink, cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace", textAlign: "center", minHeight: 44 },
   pickerOptionActive: { background: COLORS.amber, color: "#fff", fontWeight: 700 },
-  pickerPreview: { textAlign: "center", fontSize: 12.5, color: COLORS.amberDark, fontFamily: "'IBM Plex Mono', monospace", padding: "6px 0 2px" },
-  empty: { textAlign: "center", color: COLORS.steel, padding: "48px 20px", fontSize: 13.5, border: `1px dashed ${COLORS.line}`, borderRadius: 8 },
-  historyList: { display: "flex", flexDirection: "column", gap: 8 },
-  historyRow: { display: "flex", gap: 10, alignItems: "flex-start", background: "#F2EEE3", border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "10px 12px" },
-  historyIcon: { width: 24, height: 24, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 },
-  historyTop: { display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13.5 },
-  historyMeta: { fontSize: 11, color: COLORS.steel, marginTop: 4, fontFamily: "'IBM Plex Mono', monospace" },
+  pickerPreview: { textAlign: "center", fontSize: 14.5, color: COLORS.amberDark, fontFamily: "'IBM Plex Mono', monospace", padding: "6px 0 2px" },
+  empty: { textAlign: "center", color: COLORS.steel, padding: "48px 20px", fontSize: 15.5, border: `1px dashed ${COLORS.line}`, borderRadius: 8 },
+  historyList: { display: "flex", flexDirection: "column", gap: 9 },
+  historyRow: { display: "flex", gap: 10, alignItems: "flex-start", background: "#F2EEE3", border: `1px solid ${COLORS.line}`, borderRadius: 6, padding: "12px 14px" },
+  historyIcon: { width: 28, height: 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 },
+  historyTop: { display: "flex", justifyContent: "space-between", gap: 8, fontSize: 15.5 },
+  historyMeta: { fontSize: 13, color: COLORS.steel, marginTop: 4, fontFamily: "'IBM Plex Mono', monospace" },
   modalOverlay: { position: "fixed", inset: 0, background: "rgba(27,33,48,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20 },
-  modalCard: { background: COLORS.paper, borderRadius: 8, padding: 22, width: "100%", maxWidth: 320, display: "flex", flexDirection: "column", gap: 10, border: `1px solid ${COLORS.line}` },
-  modalTitle: { fontFamily: "'Oswald', sans-serif", fontSize: 17, fontWeight: 600 },
-  modalSub: { fontSize: 12.5, color: COLORS.steel, marginBottom: 2 },
-  smallPrimaryBtn: { padding: "6px 12px", borderRadius: 5, border: "none", background: COLORS.ink, color: COLORS.paper, fontSize: 12, fontWeight: 600, cursor: "pointer" },
-  smallGhostBtn: { padding: "6px 12px", borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "transparent", color: COLORS.steel, fontSize: 12, cursor: "pointer" },
-  inlineError: { color: COLORS.rust, fontSize: 12.5 },
-  inlineSuccess: { color: COLORS.amberDark, fontSize: 12.5, display: "flex", alignItems: "center", gap: 6 },
+  modalCard: { background: COLORS.paper, borderRadius: 8, padding: 22, width: "100%", maxWidth: 320, display: "flex", flexDirection: "column", gap: 11, border: `1px solid ${COLORS.line}` },
+  modalTitle: { fontFamily: "'Oswald', sans-serif", fontSize: 19, fontWeight: 600 },
+  modalSub: { fontSize: 14.5, color: COLORS.steel, marginBottom: 2 },
+  smallPrimaryBtn: { padding: "10px 16px", borderRadius: 5, border: "none", background: COLORS.ink, color: COLORS.paper, fontSize: 14, fontWeight: 600, cursor: "pointer", minHeight: 44 },
+  smallGhostBtn: { padding: "10px 16px", borderRadius: 5, border: `1px solid ${COLORS.line}`, background: "transparent", color: COLORS.steel, fontSize: 14, cursor: "pointer", minHeight: 44 },
+  inlineError: { color: COLORS.rust, fontSize: 14.5 },
+  inlineSuccess: { color: COLORS.amberDark, fontSize: 14.5, display: "flex", alignItems: "center", gap: 6 },
   stampOverlayWrap: { position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, pointerEvents: "none" },
   stampGraphic: { border: "4px solid", borderRadius: 10, padding: "16px 26px", background: "rgba(233,228,216,0.92)", textAlign: "center", fontFamily: "'Oswald', sans-serif", fontWeight: 700, transform: "rotate(-8deg)", animation: "stampThump 0.6s cubic-bezier(.2,1.6,.4,1)" },
 };
